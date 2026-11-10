@@ -69,12 +69,5 @@ iced_wgpu = "0.14.0"
 exchange.workspace = true
 data.workspace = true
 
-# Explicit lowercase bin name so the artifact filename is `acterminal` on every
-# target triple, matching the `binaries.path` in all the packager .toml files
-# (Linux filesystems are case-sensitive: `Acterminal` would not match).
-[[bin]]
-name = "acterminal"
-path = "src/main.rs"
-
 [features]
 debug = ["iced/hot"]

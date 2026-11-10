@@ -14,7 +14,7 @@ icons = [
     "assets/icons/icon.icns",
 ]
 out-dir = "./target/packager"
-binaries = [{ path = "acterminal", main = true }]
+binaries = [{ path = "Acterminal", main = true }]
 binaries-dir = "target/x86_64-pc-windows-msvc/release"
 
 before-packaging-command = "cargo build --release --target x86_64-pc-windows-msvc"
