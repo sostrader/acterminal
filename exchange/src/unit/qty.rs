@@ -1,0 +1,171 @@
+use crate::serde_util;
+
+use super::MinQtySize;
+use serde::{Deserialize, Serialize};
+
+/// Fixed atomic unit scale: 10^-QTY_SCALE is the smallest stored fraction.
+#[derive(
+    Debug, Default, Clone, Copy, PartialEq, Eq, Hash, Ord, PartialOrd, Deserialize, Serialize,
+)]
+pub struct Qty {
+    /// number of atomic units (atomic unit = 10^-QTY_SCALE)
+    pub units: i64,
+}
+
+impl Qty {
+    /// number of decimal places of the atomic unit
+    pub const QTY_SCALE: i32 = 8;
+    pub const ZERO: Self = Self { units: 0 };
+
+    /// Lossy: convert qty to f32, may lose precision beyond `QTY_SCALE`
+    pub fn to_f32_lossy(self) -> f32 {
+        self.to_f64() as f32
+    }
+
+    pub fn to_f64(self) -> f64 {
+        let scale = 10f64.powi(Self::QTY_SCALE);
+        (self.units as f64) / scale
+    }
+
+    /// Create Qty from f64 (rounds to nearest atomic unit).
+    pub fn from_f64(v: f64) -> Self {
+        let scale = 10f64.powi(Self::QTY_SCALE);
+        let units = (v * scale).round() as i64;
+        Self { units }
+    }
+
+    pub const fn from_units(units: i64) -> Self {
+        Self { units }
+    }
+
+    /// Absolute quantity, panics on `i64::MIN`.
+    pub fn abs(self) -> Self {
+        Self {
+            units: self.units.checked_abs().expect("Qty abs overflowed"),
+        }
+    }
+
+    /// Absolute difference between two quantities.
+    pub fn abs_diff(self, other: Self) -> Self {
+        if self.units >= other.units {
+            self - other
+        } else {
+            other - self
+        }
+    }
+
+    /// Guards scale/denominator values against zero-ish inputs.
+    pub fn scale_or_one(v: f64) -> f64 {
+        if v <= f64::EPSILON { 1.0 } else { v }
+    }
+
+    /// Converts to f64 and applies `scale_or_one`.
+    pub fn to_scale_or_one(self) -> f64 {
+        Self::scale_or_one(self.to_f64())
+    }
+
+    fn min_qty_units(min_qty: MinQtySize) -> i64 {
+        let exp = Self::QTY_SCALE + (min_qty.power as i32);
+        assert!(exp >= 0, "QTY_SCALE must be >= -min_qty.power");
+        10i64
+            .checked_pow(exp as u32)
+            .expect("Qty min_qty units overflowed")
+    }
+
+    pub fn round_to_min_qty(self, min_qty: MinQtySize) -> Self {
+        let unit = Self::min_qty_units(min_qty);
+        if unit <= 1 {
+            return self;
+        }
+
+        let half = unit / 2;
+        let rounded = if self.units >= 0 {
+            ((self.units + half).div_euclid(unit)) * unit
+        } else {
+            ((self.units - half).div_euclid(unit)) * unit
+        };
+
+        Self { units: rounded }
+    }
+
+    pub fn to_lots(self, min_qty: MinQtySize) -> i64 {
+        let unit = Self::min_qty_units(min_qty);
+        if unit <= 1 {
+            return self.units;
+        }
+
+        let half = unit / 2;
+        if self.units >= 0 {
+            (self.units + half).div_euclid(unit)
+        } else {
+            (self.units - half).div_euclid(unit)
+        }
+    }
+
+    pub const fn is_zero(self) -> bool {
+        self.units == 0
+    }
+}
+
+impl From<Qty> for f64 {
+    fn from(value: Qty) -> Self {
+        value.to_f64()
+    }
+}
+
+impl From<f64> for Qty {
+    fn from(value: f64) -> Self {
+        Qty::from_f64(value)
+    }
+}
+
+impl std::ops::Add for Qty {
+    type Output = Self;
+
+    fn add(self, rhs: Self) -> Self::Output {
+        Self {
+            units: self
+                .units
+                .checked_add(rhs.units)
+                .expect("Qty add overflowed"),
+        }
+    }
+}
+
+impl std::ops::AddAssign for Qty {
+    fn add_assign(&mut self, rhs: Self) {
+        self.units = self
+            .units
+            .checked_add(rhs.units)
+            .expect("Qty add_assign overflowed");
+    }
+}
+
+impl std::ops::Sub for Qty {
+    type Output = Self;
+
+    fn sub(self, rhs: Self) -> Self::Output {
+        Self {
+            units: self
+                .units
+                .checked_sub(rhs.units)
+                .expect("Qty sub overflowed"),
+        }
+    }
+}
+
+impl std::ops::SubAssign for Qty {
+    fn sub_assign(&mut self, rhs: Self) {
+        self.units = self
+            .units
+            .checked_sub(rhs.units)
+            .expect("Qty sub_assign overflowed");
+    }
+}
+
+pub fn de_qty_from_number<'de, D>(deserializer: D) -> Result<Qty, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    serde_util::de_number_like_or_object(deserializer, "qty", Qty::from_f64)
+}

@@ -1,0 +1,48 @@
+use crate::util::ok_or_default;
+use exchange::SerTicker;
+use exchange::unit::qty::Qty;
+
+use rustc_hash::FxHashMap;
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
+pub enum Threshold {
+    Count(usize),
+    Qty(Qty),
+}
+
+impl std::fmt::Display for Threshold {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Threshold::Count(count) => write!(f, "Count based: {}", count),
+            Threshold::Qty(qty) => write!(f, "Qty based: {:.2}", qty.to_f64()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
+pub struct StreamCfg {
+    pub enabled: bool,
+    pub threshold: Threshold,
+}
+
+impl Default for StreamCfg {
+    fn default() -> Self {
+        StreamCfg {
+            // Off by default — the user opts in per instrument.
+            enabled: false,
+            // "Aggression" = a single market-order trade whose size exceeds the
+            // threshold (e.g. a trade > 10 contracts hits the bid/ask).
+            threshold: Threshold::Qty(Qty::from_f64(10.0)),
+        }
+    }
+}
+
+#[derive(Default, Clone, Deserialize, Serialize)]
+#[serde(default)]
+pub struct AudioStream {
+    #[serde(deserialize_with = "ok_or_default")]
+    pub streams: FxHashMap<SerTicker, StreamCfg>,
+    #[serde(deserialize_with = "ok_or_default")]
+    pub volume: Option<f32>,
+}

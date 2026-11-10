@@ -1,0 +1,256 @@
+name: "Release"
+
+permissions:
+    contents: write
+on:
+    workflow_dispatch:
+        inputs:
+            tag:
+                description: "Specify tag to create"
+                required: true
+
+jobs:
+    create-signed-tag:
+        name: Create Signed Tag
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v4
+              with:
+                  fetch-depth: 0
+
+            - name: Import GPG key and configure Git
+              env:
+                  GPG_NAME: ${{ secrets.GPG_NAME }}
+                  GPG_EMAIL: ${{ secrets.GPG_EMAIL }}
+              run: |
+                  echo "${{ secrets.GPG_PRIVATE_KEY }}" | gpg --batch --import
+                  echo "allow-loopback-pinentry" > ~/.gnupg/gpg-agent.conf
+                  echo "pinentry-mode loopback" > ~/.gnupg/gpg.conf
+                  gpg-connect-agent reloadagent /bye
+                  KEY_ID=$(gpg --list-secret-keys --with-colons | awk -F: '/^fpr:/ {print $10; exit}')
+                  git config user.name "${GPG_NAME}"
+                  git config user.email "${GPG_EMAIL}"
+                  git config user.signingkey "$KEY_ID"
+                  cat > "$RUNNER_TEMP/gpg-wrapper.sh" << 'EOF'
+                  #!/usr/bin/env bash
+                  exec gpg --batch --yes --pinentry-mode loopback --passphrase "$GPG_PASSPHRASE" "$@"
+                  EOF
+                  chmod +x "$RUNNER_TEMP/gpg-wrapper.sh"
+                  git config gpg.program "$RUNNER_TEMP/gpg-wrapper.sh"
+
+            - name: Create signed tag
+              env:
+                  TAG: ${{ github.event.inputs.tag }}
+                  GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+              run: |
+                  if git rev-parse "refs/tags/$TAG" >/dev/null 2>&1; then
+                    TAG_COMMIT=$(git rev-list -n1 "$TAG")
+                    HEAD_COMMIT=$(git rev-parse HEAD)
+                    if [ "$TAG_COMMIT" != "$HEAD_COMMIT" ]; then
+                      echo "Tag $TAG already exists, but does not point to HEAD."
+                      exit 1
+                    fi
+                    echo "Tag $TAG already exists at HEAD, skipping creation."
+                    exit 0
+                  fi
+                  git tag -s "$TAG" -m "Release $TAG" HEAD
+                  git push origin "refs/tags/$TAG"
+
+    build:
+        name: Build
+        needs: create-signed-tag
+        strategy:
+            matrix:
+                target:
+                    - target: macos-universal
+                      os: macos-latest
+                      config: ""
+                      make: cargo packager --release
+                      artifacts: "target/packager/*.dmg"
+                    - target: windows-x64
+                      os: windows-latest
+                      config: "-c packager.windows.toml"
+                      make: cargo packager --release -c packager.windows.toml
+                      artifacts: "target/packager/*.exe"
+                    - target: linux-x64
+                      os: ubuntu-latest
+                      config: "-c packager.linux.toml"
+                      make: cargo packager --release -c packager.linux.toml
+                      artifacts: "target/packager/*.deb target/packager/*.AppImage"
+                    - target: linux-arm
+                      os: ubuntu-24.04-arm
+                      config: "-c packager.linux-arm.toml"
+                      make: cargo packager --release -c packager.linux-arm.toml
+                      artifacts: "target/packager/*.deb target/packager/*.AppImage"
+        runs-on: ${{ matrix.target.os }}
+        env:
+            FLOWSURFACE_OFFICIAL_RELEASE: "true"
+        steps:
+            - uses: actions/checkout@v3
+              with:
+                  fetch-depth: 0
+                  ref: refs/tags/${{ github.event.inputs.tag }}
+
+            - name: Read rust toolchain from rust-toolchain.toml
+              id: rust_toolchain
+              shell: bash
+              run: |
+                  channel="$(sed -nE 's/^[[:space:]]*channel[[:space:]]*=[[:space:]]*"([^"]+)"[[:space:]]*$/\1/p' rust-toolchain.toml)"
+                  if [ -z "$channel" ]; then
+                    echo "Failed to read toolchain channel from rust-toolchain.toml" >&2
+                    exit 1
+                  fi
+                  echo "channel=$channel" >> "$GITHUB_OUTPUT"
+
+            - uses: actions-rs/toolchain@v1
+              with:
+                  profile: minimal
+                  toolchain: ${{ steps.rust_toolchain.outputs.channel }}
+                  override: true
+                  targets: ${{ matrix.target.target == 'macos-universal' && 'aarch64-apple-darwin,x86_64-apple-darwin' || (matrix.target.target == 'windows-x64' && 'x86_64-pc-windows-msvc' || '') }}
+
+            - name: Install cargo-packager
+              run: cargo install cargo-packager --locked
+
+            - name: Install Linux deps
+              if: startsWith(matrix.target.target, 'linux')
+              run: |
+                  sudo apt update
+                  sudo apt install -y \
+                    build-essential \
+                    git \
+                    pkg-config \
+                    libxkbcommon-dev \
+                    libasound2-dev \
+                    libvulkan-dev \
+                    libfontconfig-dev \
+                    libwayland-dev
+
+            - name: Package
+              run: ${{ matrix.target.make }}
+
+            - name: Upload artifacts
+              uses: actions/upload-artifact@v4
+              with:
+                  name: ${{ matrix.target.target }}
+                  path: ${{ matrix.target.artifacts }}
+
+    create-release:
+        needs: build
+        name: Create Release
+        outputs:
+            upload_url: ${{ steps.create-release.outputs.upload_url }}
+        runs-on: ubuntu-latest
+        env:
+            GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        steps:
+            - name: Create Release
+              id: create-release
+              uses: actions/create-release@v1
+              with:
+                  tag_name: ${{ github.event.inputs.tag }}
+                  release_name: ${{ github.event.inputs.tag }}
+                  draft: true
+                  prerelease: false
+
+    add-assets:
+        needs: [create-release]
+        name: Add Assets
+        strategy:
+            matrix:
+                target:
+                    - artifact: macos-universal
+                      glob: "*.dmg"
+                      asset_type: application/x-apple-diskimage
+                    - artifact: windows-x64
+                      glob: "*.exe"
+                      asset_type: application/x-dosexec
+                    - artifact: linux-x64
+                      glob: "*.deb"
+                      asset_type: application/vnd.debian.binary-package
+                    - artifact: linux-x64
+                      glob: "*.AppImage"
+                      asset_type: application/x-executable
+                    - artifact: linux-arm
+                      glob: "*.deb"
+                      asset_type: application/vnd.debian.binary-package
+                    - artifact: linux-arm
+                      glob: "*.AppImage"
+                      asset_type: application/x-executable
+        runs-on: ubuntu-latest
+        env:
+            GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        steps:
+            - uses: actions/checkout@v3
+
+            - name: Download artifact
+              uses: actions/download-artifact@v4
+              with:
+                  name: ${{ matrix.target.artifact }}
+                  path: ${{ matrix.target.artifact }}
+
+            - name: Upload assets
+              run: |
+                  for f in ${{ matrix.target.artifact }}/${{ matrix.target.glob }}; do
+                    [ -e "$f" ] || continue
+                    name=$(basename "$f")
+                    echo "Uploading $name"
+                    gh release upload "${{ github.event.inputs.tag }}" "$f" --clobber
+                  done
+              env:
+                  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    generate-checksums:
+        needs: [create-release]
+        name: Generate Checksums
+        runs-on: ubuntu-latest
+        steps:
+            - name: Download all artifacts
+              uses: actions/download-artifact@v4
+              with:
+                  path: artifacts
+
+            - name: Generate checksums
+              run: |
+                  cd artifacts
+                  find . -type f \( -name '*.dmg' -o -name '*.exe' -o -name '*.deb' -o -name '*.AppImage' \) | while read -r f; do
+                    sha256sum "$f" | awk '{ gsub(/.*\//, "", file); print $1 "  " file }' file="$(basename "$f")" >> ../SHA256SUMS
+                  done
+                  cd ..
+                  cat SHA256SUMS
+
+            - name: Import GPG key
+              run: |
+                  echo "${{ secrets.GPG_PRIVATE_KEY }}" | gpg --batch --import
+                  echo "allow-loopback-pinentry" > ~/.gnupg/gpg-agent.conf
+                  gpg-connect-agent reloadagent /bye
+
+            - name: Sign checksums
+              env:
+                  GPG_TTY: /dev/null
+              run: |
+                  if [ -n "${{ secrets.GPG_PASSPHRASE }}" ]; then
+                    echo "${{ secrets.GPG_PASSPHRASE }}" | gpg --batch --yes --passphrase-fd 0 --pinentry-mode loopback --armor --detach-sign SHA256SUMS
+                  else
+                    gpg --batch --yes --pinentry-mode loopback --armor --detach-sign SHA256SUMS
+                  fi
+
+            - name: Upload checksums as release asset
+              uses: actions/upload-release-asset@v1
+              env:
+                  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+              with:
+                  upload_url: ${{ needs.create-release.outputs.upload_url }}
+                  asset_path: ./SHA256SUMS
+                  asset_name: SHA256SUMS
+                  asset_content_type: text/plain
+
+            - name: Upload signature as release asset
+              uses: actions/upload-release-asset@v1
+              env:
+                  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+              with:
+                  upload_url: ${{ needs.create-release.outputs.upload_url }}
+                  asset_path: ./SHA256SUMS.asc
+                  asset_name: SHA256SUMS.asc
+                  asset_content_type: text/plain

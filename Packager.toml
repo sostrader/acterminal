@@ -1,0 +1,38 @@
+name = "Acterminal"
+product-name = "Acterminal"
+identifier = "io.github.acterminal-rs.acterminal"
+version = "0.8.9"
+description = "A native desktop charting platform for CME FX futures, backed by Zenoh"
+homepage = "https://acterminal.com"
+authors = ["Acterminal"]
+copyright = "Copyright (c) 2025 Acterminal"
+license-file = "LICENSE"
+category = "finance"
+icons = [
+    "assets/icons/icon.png",
+    "assets/icons/icon.ico",
+    "assets/icons/icon.icns",
+]
+out-dir = "./target/packager"
+binaries = [{ path = "acterminal", main = true }]
+binaries-dir = "target/universal-apple-darwin/release"
+
+before-packaging-command = """
+rustup target add aarch64-apple-darwin x86_64-apple-darwin
+cargo build --release --target aarch64-apple-darwin
+cargo build --release --target x86_64-apple-darwin
+mkdir -p target/universal-apple-darwin/release
+lipo -create -output target/universal-apple-darwin/release/acterminal \
+  target/aarch64-apple-darwin/release/acterminal \
+  target/x86_64-apple-darwin/release/acterminal
+"""
+
+# Default target when running `cargo packager --release` on macOS: a universal binary.
+target-triple = "universal-apple-darwin"
+formats = ["app", "dmg"]
+
+[macos]
+minimum-system-version = "11.0"
+# Ad-hoc sign so the locally-built bundle launches without Gatekeeper blocking.
+# Replace with a real Developer ID identity (and add notarization env vars) for distribution.
+signing-identity = "-"

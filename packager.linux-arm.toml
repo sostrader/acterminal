@@ -1,0 +1,34 @@
+name = "Acterminal"
+product-name = "Acterminal"
+identifier = "io.github.acterminal-rs.acterminal"
+version = "0.8.9"
+description = "A native desktop charting platform for CME FX futures, backed by Zenoh"
+homepage = "https://acterminal.com"
+authors = ["Acterminal"]
+copyright = "Copyright (c) 2025 Acterminal"
+license-file = "LICENSE"
+category = "finance"
+icons = [
+    "assets/icons/icon.png",
+    "assets/icons/icon.ico",
+    "assets/icons/icon.icns",
+]
+out-dir = "./target/packager"
+binaries = [{ path = "acterminal", main = true }]
+binaries-dir = "target/aarch64-unknown-linux-gnu/release"
+
+before-packaging-command = "cargo build --release --target aarch64-unknown-linux-gnu"
+
+target-triple = "aarch64-unknown-linux-gnu"
+formats = ["deb", "appimage", "pacman"]
+
+[deb]
+depends = [
+    "libxkbcommon0",
+    "libasound2",
+    "libvulkan1",
+    "fontconfig",
+    "libwayland-client0",
+]
+
+[appimage]
