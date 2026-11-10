@@ -27,12 +27,13 @@ jobs:
                   if git rev-parse "refs/tags/$TAG" >/dev/null 2>&1; then
                     TAG_COMMIT=$(git rev-list -n1 "$TAG")
                     HEAD_COMMIT=$(git rev-parse HEAD)
-                    if [ "$TAG_COMMIT" != "$HEAD_COMMIT" ]; then
-                      echo "Tag $TAG already exists, but does not point to HEAD."
-                      exit 1
+                    if [ "$TAG_COMMIT" = "$HEAD_COMMIT" ]; then
+                      echo "Tag $TAG already exists at HEAD, skipping creation."
+                      exit 0
                     fi
-                    echo "Tag $TAG already exists at HEAD, skipping creation."
-                    exit 0
+                    echo "Tag $TAG exists at $TAG_COMMIT, moving it to HEAD ($HEAD_COMMIT)."
+                    git push origin ":refs/tags/$TAG"
+                    git tag -d "$TAG"
                   fi
                   git config user.name "github-actions[bot]"
                   git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -138,6 +139,9 @@ jobs:
             - name: Create release and upload assets
               env:
                   GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+                  # gh does not read GITHUB_REPOSITORY; without this it tries to
+                  # resolve the repo from the local git checkout (none here).
+                  GH_REPO: ${{ github.repository }}
               run: |
                   gh release create "$TAG" \
                     --title "$TAG" \
