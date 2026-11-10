@@ -6,42 +6,23 @@ on:
     workflow_dispatch:
         inputs:
             tag:
-                description: "Specify tag to create"
+                description: "Tag to create and release (e.g. 1.0)"
                 required: true
+                default: "1.0"
+
+env:
+    TAG: ${{ github.event.inputs.tag }}
 
 jobs:
-    create-signed-tag:
-        name: Create Signed Tag
+    create-tag:
+        name: Create Tag
         runs-on: ubuntu-latest
         steps:
             - uses: actions/checkout@v4
               with:
                   fetch-depth: 0
 
-            - name: Import GPG key and configure Git
-              env:
-                  GPG_NAME: ${{ secrets.GPG_NAME }}
-                  GPG_EMAIL: ${{ secrets.GPG_EMAIL }}
-              run: |
-                  echo "${{ secrets.GPG_PRIVATE_KEY }}" | gpg --batch --import
-                  echo "allow-loopback-pinentry" > ~/.gnupg/gpg-agent.conf
-                  echo "pinentry-mode loopback" > ~/.gnupg/gpg.conf
-                  gpg-connect-agent reloadagent /bye
-                  KEY_ID=$(gpg --list-secret-keys --with-colons | awk -F: '/^fpr:/ {print $10; exit}')
-                  git config user.name "${GPG_NAME}"
-                  git config user.email "${GPG_EMAIL}"
-                  git config user.signingkey "$KEY_ID"
-                  cat > "$RUNNER_TEMP/gpg-wrapper.sh" << 'EOF'
-                  #!/usr/bin/env bash
-                  exec gpg --batch --yes --pinentry-mode loopback --passphrase "$GPG_PASSPHRASE" "$@"
-                  EOF
-                  chmod +x "$RUNNER_TEMP/gpg-wrapper.sh"
-                  git config gpg.program "$RUNNER_TEMP/gpg-wrapper.sh"
-
-            - name: Create signed tag
-              env:
-                  TAG: ${{ github.event.inputs.tag }}
-                  GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+            - name: Create tag (unsigned)
               run: |
                   if git rev-parse "refs/tags/$TAG" >/dev/null 2>&1; then
                     TAG_COMMIT=$(git rev-list -n1 "$TAG")
@@ -53,13 +34,16 @@ jobs:
                     echo "Tag $TAG already exists at HEAD, skipping creation."
                     exit 0
                   fi
-                  git tag -s "$TAG" -m "Release $TAG" HEAD
+                  git config user.name "github-actions[bot]"
+                  git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+                  git tag -a "$TAG" -m "Release $TAG"
                   git push origin "refs/tags/$TAG"
 
     build:
         name: Build
-        needs: create-signed-tag
+        needs: create-tag
         strategy:
+            fail-fast: false
             matrix:
                 target:
                     - target: macos-universal
@@ -86,7 +70,7 @@ jobs:
         env:
             FLOWSURFACE_OFFICIAL_RELEASE: "true"
         steps:
-            - uses: actions/checkout@v3
+            - uses: actions/checkout@v4
               with:
                   fetch-depth: 0
                   ref: refs/tags/${{ github.event.inputs.tag }}
@@ -138,71 +122,6 @@ jobs:
     create-release:
         needs: build
         name: Create Release
-        outputs:
-            upload_url: ${{ steps.create-release.outputs.upload_url }}
-        runs-on: ubuntu-latest
-        env:
-            GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        steps:
-            - name: Create Release
-              id: create-release
-              uses: actions/create-release@v1
-              with:
-                  tag_name: ${{ github.event.inputs.tag }}
-                  release_name: ${{ github.event.inputs.tag }}
-                  draft: true
-                  prerelease: false
-
-    add-assets:
-        needs: [create-release]
-        name: Add Assets
-        strategy:
-            matrix:
-                target:
-                    - artifact: macos-universal
-                      glob: "*.dmg"
-                      asset_type: application/x-apple-diskimage
-                    - artifact: windows-x64
-                      glob: "*.exe"
-                      asset_type: application/x-dosexec
-                    - artifact: linux-x64
-                      glob: "*.deb"
-                      asset_type: application/vnd.debian.binary-package
-                    - artifact: linux-x64
-                      glob: "*.AppImage"
-                      asset_type: application/x-executable
-                    - artifact: linux-arm
-                      glob: "*.deb"
-                      asset_type: application/vnd.debian.binary-package
-                    - artifact: linux-arm
-                      glob: "*.AppImage"
-                      asset_type: application/x-executable
-        runs-on: ubuntu-latest
-        env:
-            GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        steps:
-            - uses: actions/checkout@v3
-
-            - name: Download artifact
-              uses: actions/download-artifact@v4
-              with:
-                  name: ${{ matrix.target.artifact }}
-                  path: ${{ matrix.target.artifact }}
-
-            - name: Upload assets
-              run: |
-                  for f in ${{ matrix.target.artifact }}/${{ matrix.target.glob }}; do
-                    [ -e "$f" ] || continue
-                    name=$(basename "$f")
-                    echo "Uploading $name"
-                    gh release upload "${{ github.event.inputs.tag }}" "$f" --clobber
-                  done
-              env:
-                  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-    generate-checksums:
-        needs: [create-release]
-        name: Generate Checksums
         runs-on: ubuntu-latest
         steps:
             - name: Download all artifacts
@@ -212,45 +131,16 @@ jobs:
 
             - name: Generate checksums
               run: |
-                  cd artifacts
-                  find . -type f \( -name '*.dmg' -o -name '*.exe' -o -name '*.deb' -o -name '*.AppImage' \) | while read -r f; do
-                    sha256sum "$f" | awk '{ gsub(/.*\//, "", file); print $1 "  " file }' file="$(basename "$f")" >> ../SHA256SUMS
-                  done
-                  cd ..
+                  find artifacts -type f \( -name '*.dmg' -o -name '*.exe' -o -name '*.deb' -o -name '*.AppImage' \) \
+                    -exec sha256sum {} \; | sed 's#  .*/#  #' | sort > SHA256SUMS
                   cat SHA256SUMS
 
-            - name: Import GPG key
+            - name: Create release and upload assets
+              env:
+                  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
               run: |
-                  echo "${{ secrets.GPG_PRIVATE_KEY }}" | gpg --batch --import
-                  echo "allow-loopback-pinentry" > ~/.gnupg/gpg-agent.conf
-                  gpg-connect-agent reloadagent /bye
-
-            - name: Sign checksums
-              env:
-                  GPG_TTY: /dev/null
-              run: |
-                  if [ -n "${{ secrets.GPG_PASSPHRASE }}" ]; then
-                    echo "${{ secrets.GPG_PASSPHRASE }}" | gpg --batch --yes --passphrase-fd 0 --pinentry-mode loopback --armor --detach-sign SHA256SUMS
-                  else
-                    gpg --batch --yes --pinentry-mode loopback --armor --detach-sign SHA256SUMS
-                  fi
-
-            - name: Upload checksums as release asset
-              uses: actions/upload-release-asset@v1
-              env:
-                  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-              with:
-                  upload_url: ${{ needs.create-release.outputs.upload_url }}
-                  asset_path: ./SHA256SUMS
-                  asset_name: SHA256SUMS
-                  asset_content_type: text/plain
-
-            - name: Upload signature as release asset
-              uses: actions/upload-release-asset@v1
-              env:
-                  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-              with:
-                  upload_url: ${{ needs.create-release.outputs.upload_url }}
-                  asset_path: ./SHA256SUMS.asc
-                  asset_name: SHA256SUMS.asc
-                  asset_content_type: text/plain
+                  gh release create "$TAG" \
+                    --title "$TAG" \
+                    --generate-notes \
+                    SHA256SUMS \
+                    $(find artifacts -type f \( -name '*.dmg' -o -name '*.exe' -o -name '*.deb' -o -name '*.AppImage' \))
