@@ -61,12 +61,18 @@ jobs:
                       os: ubuntu-latest
                       config: "-c packager.linux.toml"
                       make: cargo packager --release -c packager.linux.toml
-                      artifacts: "target/packager/*.deb target/packager/*.AppImage"
+                      artifacts: |
+                          target/packager/*.deb
+                          target/packager/*.AppImage
+                          target/packager/*.tar.gz
                     - target: linux-arm
                       os: ubuntu-24.04-arm
                       config: "-c packager.linux-arm.toml"
                       make: cargo packager --release -c packager.linux-arm.toml
-                      artifacts: "target/packager/*.deb target/packager/*.AppImage"
+                      artifacts: |
+                          target/packager/*.deb
+                          target/packager/*.AppImage
+                          target/packager/*.tar.gz
         runs-on: ${{ matrix.target.os }}
         env:
             FLOWSURFACE_OFFICIAL_RELEASE: "true"
@@ -116,9 +122,11 @@ jobs:
 
             - name: Upload artifacts
               uses: actions/upload-artifact@v4
+              # Fail loudly instead of silently uploading an empty artifact.
               with:
                   name: ${{ matrix.target.target }}
                   path: ${{ matrix.target.artifacts }}
+                  if-no-files-found: error
 
     create-release:
         needs: build
@@ -132,7 +140,7 @@ jobs:
 
             - name: Generate checksums
               run: |
-                  find artifacts -type f \( -name '*.dmg' -o -name '*.exe' -o -name '*.deb' -o -name '*.AppImage' \) \
+                  find artifacts -type f \( -name '*.dmg' -o -name '*.exe' -o -name '*.deb' -o -name '*.tar.gz' -o -name '*.AppImage' \) \
                     -exec sha256sum {} \; | sed 's#  .*/#  #' | sort > SHA256SUMS
                   cat SHA256SUMS
 
@@ -143,8 +151,12 @@ jobs:
                   # resolve the repo from the local git checkout (none here).
                   GH_REPO: ${{ github.repository }}
               run: |
-                  gh release create "$TAG" \
-                    --title "$TAG" \
-                    --generate-notes \
-                    SHA256SUMS \
-                    $(find artifacts -type f \( -name '*.dmg' -o -name '*.exe' -o -name '*.deb' -o -name '*.AppImage' \))
+                  FILES="SHA256SUMS
+                  $(find artifacts -type f \( -name '*.dmg' -o -name '*.exe' -o -name '*.deb' -o -name '*.tar.gz' -o -name '*.AppImage' \))"
+
+                  if gh release view "$TAG" >/dev/null 2>&1; then
+                    echo "Release $TAG already exists; replacing all assets."
+                    gh release upload "$TAG" $FILES --clobber
+                  else
+                    gh release create "$TAG" --title "$TAG" --generate-notes $FILES
+                  fi
