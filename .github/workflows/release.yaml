@@ -2,6 +2,12 @@ name: "Release"
 
 permissions:
     contents: write
+
+# Serialize runs for the same tag so a double-dispatch cannot race the
+# release upload steps.
+concurrency:
+    group: release-${{ github.event.inputs.tag }}
+
 on:
     workflow_dispatch:
         inputs:
@@ -155,8 +161,11 @@ jobs:
                   $(find artifacts -type f \( -name '*.dmg' -o -name '*.exe' -o -name '*.deb' -o -name '*.tar.gz' -o -name '*.AppImage' \))"
 
                   if gh release view "$TAG" >/dev/null 2>&1; then
-                    echo "Release $TAG already exists; replacing all assets."
-                    gh release upload "$TAG" $FILES --clobber
-                  else
-                    gh release create "$TAG" --title "$TAG" --generate-notes $FILES
+                    echo "Release $TAG already exists; deleting it (tag is kept) to recreate it fresh."
+                    gh release delete "$TAG" --cleanup-tag=false --yes
                   fi
+
+                  gh release create "$TAG" \
+                    --title "$TAG" \
+                    --generate-notes \
+                    $FILES
